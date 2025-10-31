@@ -717,7 +717,42 @@ def back_to_main_menu_admin(message):
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "📊 total sales" and str(m.from_user.id) == str(ADMIN_ID))
 def show_total_sales(message):
-    bot.send_message(message.chat.id, f"📈 Total Sales Revenue: {total_sales:.2f}৳", reply_markup=admin_menu_markup())
+    total_sold_count = 0
+    per_vpn_counts = {}
+    today_counts = {}
+    today_date = time.strftime("%Y-%m-%d")
+
+    for user_orders in orders.values():
+        for order in user_orders:
+            vpn_name = order.get("vpn_name", "Unknown VPN")
+            total_sold_count += 1
+            per_vpn_counts[vpn_name] = per_vpn_counts.get(vpn_name, 0) + 1
+
+            timestamp = order.get("timestamp", "")
+            order_date = timestamp.split(" ")[0] if " " in timestamp else timestamp
+            if order_date == today_date:
+                today_counts[vpn_name] = today_counts.get(vpn_name, 0) + 1
+
+    def format_counts(title, counts_dict):
+        if not counts_dict:
+            return f"{title}: 0"
+        lines = [title]
+        for name, count in sorted(counts_dict.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"🔹 {name}: {count}")
+        return "\n".join(lines)
+
+    today_summary = format_counts(f"📆 আজ ({today_date}) Sell", today_counts)
+    overall_summary = format_counts("🌐 মোট Sell", per_vpn_counts)
+
+    summary_text = (
+        "📈 Sales Summary\n\n"
+        f"💰 Total Revenue: {total_sales:.2f}৳\n"
+        f"🛒 Total VPN Sold: {total_sold_count}\n\n"
+        f"{today_summary}\n\n"
+        f"{overall_summary}"
+    )
+
+    bot.send_message(message.chat.id, summary_text, parse_mode="Markdown", reply_markup=admin_menu_markup())
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "📈 current stock" and str(m.from_user.id) == str(ADMIN_ID))
 def show_current_stock(message):
