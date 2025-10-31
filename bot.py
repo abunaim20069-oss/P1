@@ -48,7 +48,7 @@ total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
 processed_payments = set(data["processed_payments"])
 
-BALANCE_REPORT_INTERVAL_SECONDS = 3600
+DATA_REPORT_INTERVAL_SECONDS = 3600
 
 # Updated vpn_prices structure based on your provided list
 vpn_prices = {
@@ -122,37 +122,45 @@ def parse_amount(text):
     m = re.search(r'\bTk\s?([0-9]+(?:\.[0-9]{1,2})?)\b', text.replace(",", ""), re.I)
     return float(m.group(1)) if m else None
 
-def generate_balance_report_file():
+def generate_data_snapshot_file():
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
-    sorted_balances = {uid: balances.get(uid, 0.0) for uid in sorted(balances.keys(), key=lambda x: x)}
-    report_payload = {
-        "generated_at": generated_at,
-        "user_count": len(sorted_balances),
-        "balances": sorted_balances
-    }
-
     safe_timestamp = generated_at.replace(" ", "_").replace(":", "-")
-    filename = f"balances_report_{safe_timestamp}.json"
+    filename = f"bot_data_snapshot_{safe_timestamp}.json"
     file_path = os.path.join(tempfile.gettempdir(), filename)
 
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(report_payload, f, ensure_ascii=False, indent=2)
+        save_data(data)
     except Exception as e:
-        log(f"Failed to generate balance report: {e}")
+        log(f"Failed to persist data before snapshot: {e}")
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as src:
+            contents = src.read()
+    except FileNotFoundError:
+        log("DATA_FILE not found; using in-memory data for snapshot.")
+        contents = json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"Failed to read DATA_FILE: {e}")
+        contents = json.dumps(data, ensure_ascii=False, indent=2)
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as dst:
+            dst.write(contents)
+    except Exception as e:
+        log(f"Failed to write snapshot file: {e}")
         raise
 
     return file_path, generated_at
 
-def send_balance_report(target_chat_id, reason="Scheduled hourly snapshot"):
+def send_bot_data_snapshot(target_chat_id, reason="Scheduled hourly snapshot"):
     try:
-        file_path, generated_at = generate_balance_report_file()
+        file_path, generated_at = generate_data_snapshot_file()
     except Exception as e:
-        log(f"Unable to create balance report: {e}")
+        log(f"Unable to create bot data snapshot: {e}")
         return
 
     caption_lines = [
-        "📄 Balance Snapshot",
+        "📄 Bot Data Snapshot",
         f"Generated: {generated_at}",
     ]
     if reason:
@@ -170,24 +178,24 @@ def send_balance_report(target_chat_id, reason="Scheduled hourly snapshot"):
                 visible_file_name=os.path.basename(file_path)
             )
     except Exception as e:
-        log(f"Failed to send balance report: {e}")
+        log(f"Failed to send bot data snapshot: {e}")
     finally:
         try:
             os.remove(file_path)
         except Exception:
             pass
 
-def _balance_report_worker():
-    log("Starting balance report scheduler thread")
+def _data_report_worker():
+    log("Starting bot data report scheduler thread")
     while True:
         try:
-            send_balance_report(ADMIN_ID)
+            send_bot_data_snapshot(ADMIN_ID)
         except Exception as e:
             log(f"Scheduler error: {e}")
-        time.sleep(BALANCE_REPORT_INTERVAL_SECONDS)
+        time.sleep(DATA_REPORT_INTERVAL_SECONDS)
 
-def start_balance_report_scheduler():
-    scheduler_thread = threading.Thread(target=_balance_report_worker, name="BalanceReportScheduler", daemon=True)
+def start_data_report_scheduler():
+    scheduler_thread = threading.Thread(target=_data_report_worker, name="BotDataReportScheduler", daemon=True)
     scheduler_thread.start()
 
 # ========== START COMMANDS ==========
@@ -615,7 +623,7 @@ def ask_broadcast_message(message):
 def send_data_snapshot(message):
     if str(message.from_user.id) != str(ADMIN_ID):
         return
-    send_balance_report(message.chat.id, "Manual /data request")
+    send_bot_data_snapshot(message.chat.id, "Manual /data request")
 
 def broadcast_to_all(message):
     if str(message.from_user.id) != str(ADMIN_ID):
@@ -961,7 +969,7 @@ def process_add_vpn_account(message, vpn_name):
 
 # ========== ERROR HANDLER ==========
 
-start_balance_report_scheduler()
+start_data_report_scheduler()
 
 print("Bot polling...")
 bot.infinity_polling(
