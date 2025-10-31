@@ -888,14 +888,12 @@ def back_to_main_menu_admin(message):
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "📊 total sales" and str(m.from_user.id) == str(ADMIN_ID))
 def show_total_sales(message):
-    total_sold_count = 0
     today_counts = {}
     today_date = time.strftime("%Y-%m-%d")
 
     for user_orders in orders.values():
         for order in user_orders:
             vpn_name = order.get("vpn_name", "Unknown VPN")
-            total_sold_count += 1
 
             timestamp = order.get("timestamp", "")
             order_date = timestamp.split(" ")[0] if " " in timestamp else timestamp
@@ -913,8 +911,7 @@ def show_total_sales(message):
     today_summary = format_counts(f"📆 আজ ({today_date}) Sell", today_counts)
     summary_text = (
         "📈 Sales Summary\n\n"
-        f"💰 Total Revenue: {total_sales:.2f}৳\n"
-        f"🛒 Total VPN Sold: {total_sold_count}\n\n"
+        f"💰 Total Revenue: {total_sales:.2f}৳\n\n"
         f"{today_summary}"
     )
 
