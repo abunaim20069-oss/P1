@@ -1,4 +1,4 @@
-import json, re, sys
+import json, re, sys, os, threading, tempfile
 import telebot
 from telebot.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 import time # For timestamp in orders
@@ -47,6 +47,8 @@ orders             = data["orders"]
 total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
 processed_payments = set(data["processed_payments"])
+
+BALANCE_REPORT_INTERVAL_SECONDS = 3600
 
 # Updated vpn_prices structure based on your provided list
 vpn_prices = {
@@ -119,6 +121,74 @@ def parse_trx_id(text):
 def parse_amount(text): 
     m = re.search(r'\bTk\s?([0-9]+(?:\.[0-9]{1,2})?)\b', text.replace(",", ""), re.I)
     return float(m.group(1)) if m else None
+
+def generate_balance_report_file():
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    sorted_balances = {uid: balances.get(uid, 0.0) for uid in sorted(balances.keys(), key=lambda x: x)}
+    report_payload = {
+        "generated_at": generated_at,
+        "user_count": len(sorted_balances),
+        "balances": sorted_balances
+    }
+
+    safe_timestamp = generated_at.replace(" ", "_").replace(":", "-")
+    filename = f"balances_report_{safe_timestamp}.json"
+    file_path = os.path.join(tempfile.gettempdir(), filename)
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(report_payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"Failed to generate balance report: {e}")
+        raise
+
+    return file_path, generated_at
+
+def send_balance_report(target_chat_id, reason="Scheduled hourly snapshot"):
+    try:
+        file_path, generated_at = generate_balance_report_file()
+    except Exception as e:
+        log(f"Unable to create balance report: {e}")
+        return
+
+    caption_lines = [
+        "📄 Balance Snapshot",
+        f"Generated: {generated_at}",
+    ]
+    if reason:
+        caption_lines.append(f"Reason: {reason}")
+    caption_lines.append(f"Users tracked: {len(balances)}")
+    caption = "\n".join(caption_lines)
+
+    try:
+        with open(file_path, "rb") as report_file:
+            bot.send_document(
+                target_chat_id,
+                report_file,
+                caption=caption,
+                parse_mode="Markdown",
+                visible_file_name=os.path.basename(file_path)
+            )
+    except Exception as e:
+        log(f"Failed to send balance report: {e}")
+    finally:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+def _balance_report_worker():
+    log("Starting balance report scheduler thread")
+    while True:
+        try:
+            send_balance_report(ADMIN_ID)
+        except Exception as e:
+            log(f"Scheduler error: {e}")
+        time.sleep(BALANCE_REPORT_INTERVAL_SECONDS)
+
+def start_balance_report_scheduler():
+    scheduler_thread = threading.Thread(target=_balance_report_worker, name="BalanceReportScheduler", daemon=True)
+    scheduler_thread.start()
 
 # ========== START COMMANDS ==========
 @bot.message_handler(commands=['start', 'admin'])
@@ -541,6 +611,12 @@ def ask_broadcast_message(message):
     msg = bot.send_message(message.chat.id, "📢 Send the message you want to broadcast to all users:", reply_markup=ForceReply())
     bot.register_next_step_handler(msg, broadcast_to_all)
 
+@bot.message_handler(commands=['data'])
+def send_data_snapshot(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    send_balance_report(message.chat.id, "Manual /data request")
+
 def broadcast_to_all(message):
     if str(message.from_user.id) != str(ADMIN_ID):
         return
@@ -884,6 +960,8 @@ def process_add_vpn_account(message, vpn_name):
     bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
 
 # ========== ERROR HANDLER ==========
+
+start_balance_report_scheduler()
 
 print("Bot polling...")
 bot.infinity_polling(
