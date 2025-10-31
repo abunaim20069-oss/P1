@@ -100,7 +100,6 @@ def main_menu_markup():
 def admin_menu_markup():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📊 Total Sales", "📈 Current Stock")
-    kb.row("👥 Buyers")
     kb.row("➕ Add VPN Account", "📩 Free Orders")
     kb.row("⬅️ Main Menu (User)")
     return kb
@@ -122,6 +121,55 @@ def parse_trx_id(text):
 def parse_amount(text): 
     m = re.search(r'\bTk\s?([0-9]+(?:\.[0-9]{1,2})?)\b', text.replace(",", ""), re.I)
     return float(m.group(1)) if m else None
+
+def build_buyer_stats_report(max_list=15):
+    total_users = len(balances)
+    buyer_map = {uid: user_orders for uid, user_orders in orders.items() if user_orders}
+
+    if not buyer_map:
+        return (
+            "👥 Buyer Overview\n\n"
+            f"Total Users: {total_users}\n"
+            "Unique Buyers: 0\n"
+            "Total Orders: 0\n\n"
+            "এখনো কেউ কোনো VPN কেনেনি।"
+        )
+
+    total_unique = len(buyer_map)
+    total_orders = sum(len(user_orders) for user_orders in buyer_map.values())
+
+    def ts_to_epoch(ts):
+        try:
+            return time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return 0
+
+    buyer_entries = []
+    for uid, user_orders in buyer_map.items():
+        order_count = len(user_orders)
+        last_timestamp = user_orders[-1].get("timestamp", "N/A")
+        buyer_entries.append((uid, order_count, last_timestamp, ts_to_epoch(last_timestamp)))
+
+    buyer_entries.sort(key=lambda item: (-item[1], -item[3], item[0]))
+
+    lines = [
+        "👥 Buyer Overview",
+        "",
+        f"Total Users: {total_users}",
+        f"Unique Buyers: {total_unique}",
+        f"Total Orders: {total_orders}",
+        "",
+        "🏆 Top Buyers:",
+    ]
+
+    for idx, (uid, count, last_ts, _) in enumerate(buyer_entries[:max_list], start=1):
+        lines.append(f"{idx}. `{uid}` — {count} order(s) (last: {last_ts})")
+
+    remaining = len(buyer_entries) - max_list
+    if remaining > 0:
+        lines.append(f"… এবং আরও {remaining} জন")
+
+    return "\n".join(lines)
 
 def generate_data_snapshot_file():
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -854,49 +902,12 @@ def show_current_stock(message):
     
     bot.send_message(message.chat.id, stock_report, parse_mode="Markdown", reply_markup=admin_menu_markup())
 
-@bot.message_handler(func=lambda m: norm_text(m.text) == "👥 buyers" and str(m.from_user.id) == str(ADMIN_ID))
-def show_buyer_stats(message):
-    buyer_map = {uid: user_orders for uid, user_orders in orders.items() if user_orders}
-
-    if not buyer_map:
-        bot.send_message(message.chat.id, "👥 এখনো কেউ কোনো VPN কেনেনি।", reply_markup=admin_menu_markup())
+@bot.message_handler(commands=['buyer'])
+def send_buyer_stats(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
         return
-
-    total_unique = len(buyer_map)
-    total_orders = sum(len(user_orders) for user_orders in buyer_map.values())
-
-    def ts_to_epoch(ts):
-        try:
-            return time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
-        except Exception:
-            return 0
-
-    buyer_entries = []
-    for uid, user_orders in buyer_map.items():
-        order_count = len(user_orders)
-        last_timestamp = user_orders[-1].get("timestamp", "N/A")
-        buyer_entries.append((uid, order_count, last_timestamp, ts_to_epoch(last_timestamp)))
-
-    buyer_entries.sort(key=lambda item: (-item[1], -item[3], item[0]))
-
-    lines = [
-        "👥 Buyer Overview",
-        "",
-        f"Unique Buyers: {total_unique}",
-        f"Total Orders: {total_orders}",
-        "",
-        "🏆 Top Buyers:",
-    ]
-
-    max_list = 15
-    for idx, (uid, count, last_ts, _) in enumerate(buyer_entries[:max_list], start=1):
-        lines.append(f"{idx}. `{uid}` — {count} order(s) (last: {last_ts})")
-
-    remaining = len(buyer_entries) - max_list
-    if remaining > 0:
-        lines.append(f"… এবং আরও {remaining} জন")
-
-    bot.send_message(message.chat.id, "\n".join(lines), parse_mode="Markdown", reply_markup=admin_menu_markup())
+    report = build_buyer_stats_report()
+    bot.send_message(message.chat.id, report, parse_mode="Markdown", reply_markup=admin_menu_markup())
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "➕ add vpn account" and str(m.from_user.id) == str(ADMIN_ID))
 def ask_add_vpn_account(message):
