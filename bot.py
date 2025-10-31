@@ -171,6 +171,33 @@ def build_buyer_stats_report(max_list=15):
 
     return "\n".join(lines)
 
+def reset_user_balance(admin_chat_id, target_uid):
+    target_uid = str(target_uid).strip()
+    if not target_uid:
+        bot.send_message(admin_chat_id, "❌ ইউজার আইডি প্রদান করুন।")
+        return
+
+    if target_uid not in balances:
+        bot.send_message(admin_chat_id, f"❌ ইউজার `{target_uid}` পাওয়া যায়নি।", parse_mode="Markdown")
+        return
+
+    previous_balance = balances.get(target_uid, 0.0)
+
+    if previous_balance == 0.0:
+        bot.send_message(admin_chat_id, f"ℹ️ ইউজার `{target_uid}` এর ব্যালেন্স আগে থেকেই 0 ছিল।", parse_mode="Markdown")
+        return
+
+    balances[target_uid] = 0.0
+    data["balances"] = balances
+    save_data(data)
+
+    bot.send_message(admin_chat_id, f"✅ ইউজার `{target_uid}` এর ব্যালেন্স 0 করা হয়েছে (আগে ছিল {previous_balance:.2f}৳)।", parse_mode="Markdown")
+
+    try:
+        bot.send_message(int(target_uid), "⚠️ আপনার ব্যালেন্স এডমিন কর্তৃক 0 করা হয়েছে। যদি কোনো প্রশ্ন থাকে, যোগাযোগ করুন।")
+    except Exception as e:
+        log(f"Could not notify user {target_uid} about balance reset: {e}")
+
 def generate_data_snapshot_file():
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
     safe_timestamp = generated_at.replace(" ", "_").replace(":", "-")
@@ -909,6 +936,30 @@ def send_buyer_stats(message):
     ensure_user(str(message.from_user.id))
     report = build_buyer_stats_report()
     bot.send_message(message.chat.id, report, parse_mode="Markdown")
+
+@bot.message_handler(commands=['removebalance', 'removrblance'])
+def remove_balance_command(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        reset_user_balance(message.chat.id, parts[1].strip())
+        return
+
+    prompt = bot.send_message(message.chat.id, "কোন ইউজারের ব্যালেন্স 0 করতে চান? User ID পাঠান:", reply_markup=ForceReply())
+    bot.register_next_step_handler(prompt, remove_balance_followup)
+
+def remove_balance_followup(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    target_uid = (message.text or "").strip()
+    if not target_uid:
+        bot.send_message(message.chat.id, "❌ ইউজার আইডি খালি থাকতে পারে না। অপারেশন বাতিল।")
+        return
+
+    reset_user_balance(message.chat.id, target_uid)
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "➕ add vpn account" and str(m.from_user.id) == str(ADMIN_ID))
 def ask_add_vpn_account(message):
