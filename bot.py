@@ -30,9 +30,11 @@ def load_data():
     data.setdefault("total_sales", 0.0)
     # NEW: Free orders store for out-of-stock requests
     data.setdefault("free_orders", {}) # {order_id: {user_id, vpn_name, price, timestamp, delivered, delivery_details(optional)}}
+    data.setdefault("processed_payments", [])
     return data
 
 def save_data(d):
+    d["processed_payments"] = sorted(processed_payments)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 
@@ -44,6 +46,7 @@ unmatched_payments = data["unmatched_payments"]
 orders             = data["orders"]
 total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
+processed_payments = set(data["processed_payments"])
 
 # Updated vpn_prices structure based on your provided list
 vpn_prices = {
@@ -468,6 +471,11 @@ def save_trx_id(message):
         bot.reply_to(message, "❌ Invalid TRX ID format. Please enter a valid Transaction ID.")
         bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
         return
+
+    if trx in processed_payments:
+        bot.reply_to(message, "❌ This TRX ID has already been confirmed. Please use a new one.")
+        bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+        return
     
     if trx in pending_payments:
         bot.reply_to(message, "⏳ This TRX ID is already pending admin confirmation.")
@@ -481,6 +489,7 @@ def save_trx_id(message):
         amt = unmatched_payments.pop(trx)
         balances[uid] = round(balances.get(uid, 0.0) + amt, 2)
         data["balances"], data["unmatched_payments"] = balances, unmatched_payments
+        processed_payments.add(trx)
         save_data(data)
         bot.reply_to(message, f"আপনার ব্যালেন্স সফলভাবে যুক্ত হয়েছে! 🎉\n \t└{amt} TK\n\t└ধন্যবাদ! 💖")
         bot.send_message(ADMIN_ID, f"✅ Auto-confirmed TRX `{trx.upper()}` for user `{uid}`. Amount: {amt} TK", parse_mode="Markdown")
@@ -503,11 +512,16 @@ def admin_bkash_nagad_parser(m):
     if not trx or amt is None:
         bot.reply_to(m, "❌ Could not extract TRX ID or amount from the SMS.")
         return
+
+    if trx in processed_payments:
+        bot.reply_to(m, f"⚠️ TRX ID `{trx.upper()}` already confirmed before. Ignoring duplicate message.", parse_mode="Markdown")
+        return
     
     if trx in pending_payments:
         uid = pending_payments.pop(trx)
         balances[uid] = round(balances.get(uid, 0.0) + amt, 2)
         data["balances"], data["pending_payments"] = balances, pending_payments
+        processed_payments.add(trx)
         save_data(data)
         bot.send_message(int(uid), f"আপনার ব্যালেন্স সফলভাবে যুক্ত হয়েছে! 🎉:\n\t└ {amt} TK\n\t└Transaction ID: `{trx.upper()}`\n\t└ধন্যবাদ! 💖", parse_mode="Markdown")
         bot.reply_to(m, f"✅ Auto-confirmed.\nUser: `{uid}`\nAmount: {amt} TK\nTRX: `{trx.upper()}`", parse_mode="Markdown")
