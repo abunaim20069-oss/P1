@@ -739,8 +739,12 @@ def admin_selected_vpn_to_add(c):
     format_example = ""
     for field in prompt_fields:
         format_example += f"*{field}*:your_{field.lower().replace(' ', '_')}_value\n"
-    
-    prompt_text += f"`{format_example.strip()}`"
+
+    prompt_text += (
+        f"`{format_example.strip()}`\n\n"
+        "👉 আপনি একই ফরম্যাট বারবার লিখে একসাথে একাধিক একাউন্ট যোগ করতে পারবেন।\n"
+        "প্রতিটি একাউন্টের তথ্য আলাদা লাইনে বা ফাঁকা লাইন দিয়ে লিখুন।"
+    )
 
     msg = bot.send_message(c.message.chat.id, prompt_text, parse_mode="Markdown", reply_markup=ForceReply())
     bot.register_next_step_handler(msg, process_add_vpn_account, vpn_name)
@@ -748,37 +752,86 @@ def admin_selected_vpn_to_add(c):
 
 def process_add_vpn_account(message, vpn_name):
     txt = (message.text or "").strip()
-    details = {}
-    lines = txt.split('\n')
-    
-    # Parse input based on expected fields
-    required_fields_for_vpn = product_fields.get(vpn_name, ["Gmail", "Password"]) # Default to Gmail/Password
-    
-    parsed_count = 0
-    for line in lines:
-        if ':' in line:
-            key, value = line.split(':', 1)
-            standardized_key = key.strip().lower().replace(" ", "_")
-            details[standardized_key] = value.strip()
-            parsed_count += 1
-    
-    # Check if all required fields are present
-    missing_fields = []
-    for field in required_fields_for_vpn:
-        standardized_field_key = field.lower().replace(" ", "_")
-        if standardized_field_key not in details or not details[standardized_field_key]:
-            missing_fields.append(field)
-
-    if missing_fields:
-        bot.reply_to(message, f"❌ Invalid format. The following fields are required: {', '.join(missing_fields)}. Please try again.")
+    if not txt:
+        bot.reply_to(message, "❌ No data received. Please send the account details in the requested format.")
         bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
         return
 
-    products.setdefault(vpn_name, []).append(details) # Store the details dictionary as is
+    required_fields_for_vpn = product_fields.get(vpn_name, ["Gmail", "Password"]) # Default to Gmail/Password
+    required_keys = [field.lower().replace(" ", "_") for field in required_fields_for_vpn]
+
+    def all_required_present(record):
+        return all(record.get(key) for key in required_keys)
+
+    accounts_to_add = []
+    current_record = {}
+
+    for raw_line in message.text.splitlines():
+        line = (raw_line or "").strip()
+
+        # Treat blank line as separator between accounts
+        if not line:
+            if current_record:
+                if all_required_present(current_record):
+                    accounts_to_add.append(current_record.copy())
+                    current_record = {}
+                else:
+                    missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+                    bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+                    bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+                    return
+            continue
+
+        if ':' not in line:
+            continue
+
+        key, value = line.split(':', 1)
+        standardized_key = key.strip().lower().replace(" ", "_")
+        standardized_value = value.strip()
+
+        # If the admin repeats a required key before finishing current record, assume a new record
+        if standardized_key in current_record and standardized_key in required_keys:
+            if all_required_present(current_record):
+                accounts_to_add.append(current_record.copy())
+                current_record = {}
+            else:
+                missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+                bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+                bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+                return
+
+        current_record[standardized_key] = standardized_value
+
+        if all_required_present(current_record):
+            accounts_to_add.append(current_record.copy())
+            current_record = {}
+
+    # Handle any remaining record at the end
+    if current_record:
+        if all_required_present(current_record):
+            accounts_to_add.append(current_record.copy())
+        else:
+            missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+            bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+            bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+            return
+
+    if not accounts_to_add:
+        bot.reply_to(message, "❌ No valid account found. Please follow the provided format and try again.")
+        bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+        return
+
+    stock_list = products.setdefault(vpn_name, [])
+    before_count = len(stock_list)
+
+    for account in accounts_to_add:
+        stock_list.append(account)
+
     data["products"] = products
     save_data(data)
-    
-    bot.reply_to(message, f"✅ Successfully added 1 account for *{vpn_name}* to stock. Current stock: {len(products[vpn_name])}", parse_mode="Markdown")
+
+    added_count = len(stock_list) - before_count
+    bot.reply_to(message, f"✅ Successfully added {added_count} account(s) for *{vpn_name}* to stock. Current stock: {len(stock_list)}", parse_mode="Markdown")
     bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
 
 # ========== ERROR HANDLER ==========
