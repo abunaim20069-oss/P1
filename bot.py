@@ -906,8 +906,9 @@ def show_current_stock(message):
 def send_buyer_stats(message):
     if str(message.from_user.id) != str(ADMIN_ID):
         return
+    ensure_user(str(message.from_user.id))
     report = build_buyer_stats_report()
-    bot.send_message(message.chat.id, report, parse_mode="Markdown", reply_markup=admin_menu_markup())
+    bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "➕ add vpn account" and str(m.from_user.id) == str(ADMIN_ID))
 def ask_add_vpn_account(message):
