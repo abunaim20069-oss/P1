@@ -107,6 +107,16 @@ def admin_menu_markup():
 def norm_text(s): return " ".join(s.strip().split()).lower() if isinstance(s, str) else ""
 def ensure_user(uid): balances.setdefault(uid, 0.0); orders.setdefault(uid, [])
 
+def admin_command_help():
+    return (
+        "📋 Admin Slash Commands:\n"
+        "/data – বর্তমান bot_data.json ফাইল পাঠাবে\n"
+        "/buyer – মোট ইউজার, বায়ার সংখ্যা ও টপ বায়ার লিস্ট\n"
+        "/removebalance <user_id> – নির্দিষ্ট ইউজারের ব্যালেন্স 0 করবে\n"
+        "/broadcast – সবার কাছে ম্যাসেজ পাঠাবে\n"
+        "/remind_freeorders – Pending free order ইউজারদের রিমাইন্ডার"
+    )
+
 def parse_trx_id(text): 
     m_bkash = re.search(r'TrxID[:\s]+([A-Za-z0-9]+)', text, re.I)
     if m_bkash:
@@ -300,7 +310,8 @@ def start_or_admin(message):
     )
 
     if uid == str(ADMIN_ID):
-        bot.send_message(message.chat.id, "👋 Welcome Admin! Choose an option:", reply_markup=admin_menu_markup())
+        welcome_text = "👋 Welcome Admin! Choose an option:\n\n" + admin_command_help()
+        bot.send_message(message.chat.id, welcome_text, reply_markup=admin_menu_markup())
     else:
         if WELCOME_PHOTO_FILE_ID:
             try:
