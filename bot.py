@@ -909,11 +909,7 @@ def show_total_sales(message):
         return "\n".join(lines)
 
     today_summary = format_counts(f"📆 আজ ({today_date}) Sell", today_counts)
-    summary_text = (
-        "📈 Sales Summary\n\n"
-        f"💰 Total Revenue: {total_sales:.2f}৳\n\n"
-        f"{today_summary}"
-    )
+    summary_text = "📈 Sales Summary\n\n" + today_summary
 
     bot.send_message(message.chat.id, summary_text, parse_mode="Markdown", reply_markup=admin_menu_markup())
 
