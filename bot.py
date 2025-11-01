@@ -6,7 +6,8 @@ import time # For timestamp in orders
 # ========== CONFIG ==========
 BOT_TOKEN = "8326652338:AAEz4IjiuW792yzwoBOJ4YD3jxtudqO4zco" # আপনার বট টোকেন
 ADMIN_ID  = 6413241219# আপনার অ্যাডমিন টেলিগ্রাম ইউজার আইডি
-DATA_FILE = "bot_data.json"
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "bot_data.json")
 
 BOT_ID = int(BOT_TOKEN.split(":")[0]) # <--- এটিই সঠিক লাইন
 
@@ -15,28 +16,168 @@ WELCOME_PHOTO_FILE_ID = "AgACAgUAAxkBAANhaP5JbanDLp49uWHygkJdZcpL8P0AAlIMaxvdG_B
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
+def to_snake_key(value):
+    value = str(value or "").strip().lower()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"_+", "_", value)
+    return value
+
+def normalize_balances(balances_input):
+    normalized = {}
+    if isinstance(balances_input, dict):
+        for uid, amount in balances_input.items():
+            key = str(uid)
+            try:
+                normalized[key] = float(amount)
+            except (TypeError, ValueError):
+                normalized[key] = 0.0
+    return normalized
+
+def normalize_products(products_input):
+    normalized = {}
+    if isinstance(products_input, dict):
+        for vpn_name, items in products_input.items():
+            key = str(vpn_name)
+            normalized_items = []
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        normalized_items.append({to_snake_key(k): v for k, v in item.items()})
+            normalized[key] = normalized_items
+    return normalized
+
+def normalize_orders(orders_input):
+    normalized = {}
+    if isinstance(orders_input, dict):
+        for uid, order_list in orders_input.items():
+            if not isinstance(order_list, list):
+                continue
+            clean_orders = []
+            for order in order_list:
+                if not isinstance(order, dict):
+                    continue
+                order_copy = dict(order)
+                item = order_copy.get("item")
+                if isinstance(item, dict):
+                    order_copy["item"] = {to_snake_key(k): v for k, v in item.items()}
+                clean_orders.append(order_copy)
+            normalized[str(uid)] = clean_orders
+    return normalized
+
+def normalize_pending_payments(pending_input):
+    normalized = {}
+    if isinstance(pending_input, dict):
+        for trx, uid in pending_input.items():
+            normalized[str(trx).lower()] = str(uid)
+    return normalized
+
+def normalize_unmatched_payments(unmatched_input):
+    normalized = {}
+    if isinstance(unmatched_input, dict):
+        for trx, amount in unmatched_input.items():
+            key = str(trx).lower()
+            try:
+                normalized[key] = float(amount)
+            except (TypeError, ValueError):
+                continue
+    return normalized
+
+def normalize_free_orders(free_orders_input):
+    normalized = {}
+    if isinstance(free_orders_input, dict):
+        for oid, info in free_orders_input.items():
+            if not isinstance(info, dict):
+                continue
+            entry = dict(info)
+            entry["user_id"] = str(entry.get("user_id", ""))
+            entry["vpn_name"] = str(entry.get("vpn_name", ""))
+            if "price" in entry:
+                try:
+                    entry["price"] = float(entry["price"])
+                except (TypeError, ValueError):
+                    entry["price"] = 0.0
+            entry["delivered"] = bool(entry.get("delivered", False))
+            delivery_details = entry.get("delivery_details")
+            if isinstance(delivery_details, dict):
+                entry["delivery_details"] = {to_snake_key(k): v for k, v in delivery_details.items()}
+            normalized[str(oid)] = entry
+    return normalized
+
+def normalize_processed_payments(values):
+    normalized_set = set()
+    iterable = []
+    if isinstance(values, dict):
+        iterable = values.keys()
+    elif isinstance(values, (list, set, tuple)):
+        iterable = values
+    for item in iterable:
+        if item is None:
+            continue
+        normalized_set.add(str(item).lower())
+    return sorted(normalized_set)
+
+def normalize_total_sales(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
 # ========== DATA ==========
 def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-    data.setdefault("products", {}) # { "VPN_Name": [{"gmail": "...", "password": "..."}] }
+    raw = {}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[WARN] Failed to load data file: {e}. Using defaults.")
+            raw = {}
+    data = {}
+    data["products"] = normalize_products(raw.get("products", {}))
+    data["balances"] = normalize_balances(raw.get("balances", {}))
+    data["pending_payments"] = normalize_pending_payments(raw.get("pending_payments", {}))
+    data["unmatched_payments"] = normalize_unmatched_payments(raw.get("unmatched_payments", {}))
+    data["orders"] = normalize_orders(raw.get("orders", {}))
+    data["total_sales"] = normalize_total_sales(raw.get("total_sales", 0.0))
+    data["free_orders"] = normalize_free_orders(raw.get("free_orders", {}))
+    data["processed_payments"] = normalize_processed_payments(raw.get("processed_payments", []))
+
+    data.setdefault("products", {})
     data.setdefault("balances", {})
     data.setdefault("pending_payments", {})
     data.setdefault("unmatched_payments", {})
     data.setdefault("orders", {})
     data.setdefault("total_sales", 0.0)
-    # NEW: Free orders store for out-of-stock requests
-    data.setdefault("free_orders", {}) # {order_id: {user_id, vpn_name, price, timestamp, delivered, delivery_details(optional)}}
+    data.setdefault("free_orders", {})
     data.setdefault("processed_payments", [])
     return data
 
 def save_data(d):
-    d["processed_payments"] = sorted(processed_payments)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+    payload = {
+        "products": normalize_products(d.get("products", {})),
+        "balances": normalize_balances(d.get("balances", {})),
+        "pending_payments": normalize_pending_payments(d.get("pending_payments", {})),
+        "unmatched_payments": normalize_unmatched_payments(d.get("unmatched_payments", {})),
+        "orders": normalize_orders(d.get("orders", {})),
+        "total_sales": normalize_total_sales(d.get("total_sales", 0.0)),
+        "free_orders": normalize_free_orders(d.get("free_orders", {})),
+        "processed_payments": normalize_processed_payments(processed_payments),
+    }
+
+    temp_fd, temp_path = tempfile.mkstemp(dir=BASE_DIR, prefix="bot_data.", suffix=".tmp")
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, ensure_ascii=False, indent=2)
+        os.replace(temp_path, DATA_FILE)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+    # Keep in-memory reference updated for processed_payments list if needed
+    d["processed_payments"] = payload["processed_payments"]
 
 data               = load_data()
 products           = data["products"]
@@ -47,6 +188,11 @@ orders             = data["orders"]
 total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
 processed_payments = set(data["processed_payments"])
+
+print("DATA_FILE path:", DATA_FILE)
+print("Exists:", os.path.exists(DATA_FILE))
+print("Balances users count:", len(balances))
+print("Total stock items:", sum(len(v) for v in products.values()))
 
 DATA_REPORT_INTERVAL_SECONDS = 3600
 
