@@ -1,4 +1,4 @@
-import json, re, sys
+import json, re, sys, os, threading, tempfile
 import telebot
 from telebot.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 import time # For timestamp in orders
@@ -6,7 +6,8 @@ import time # For timestamp in orders
 # ========== CONFIG ==========
 BOT_TOKEN = "8326652338:AAEz4IjiuW792yzwoBOJ4YD3jxtudqO4zco" # আপনার বট টোকেন
 ADMIN_ID  = 6413241219# আপনার অ্যাডমিন টেলিগ্রাম ইউজার আইডি
-DATA_FILE = "bot_data.json"
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "bot_data.json")
 
 BOT_ID = int(BOT_TOKEN.split(":")[0]) # <--- এটিই সঠিক লাইন
 
@@ -15,26 +16,168 @@ WELCOME_PHOTO_FILE_ID = "AgACAgUAAxkBAANhaP5JbanDLp49uWHygkJdZcpL8P0AAlIMaxvdG_B
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
+def to_snake_key(value):
+    value = str(value or "").strip().lower()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"_+", "_", value)
+    return value
+
+def normalize_balances(balances_input):
+    normalized = {}
+    if isinstance(balances_input, dict):
+        for uid, amount in balances_input.items():
+            key = str(uid)
+            try:
+                normalized[key] = float(amount)
+            except (TypeError, ValueError):
+                normalized[key] = 0.0
+    return normalized
+
+def normalize_products(products_input):
+    normalized = {}
+    if isinstance(products_input, dict):
+        for vpn_name, items in products_input.items():
+            key = str(vpn_name)
+            normalized_items = []
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        normalized_items.append({to_snake_key(k): v for k, v in item.items()})
+            normalized[key] = normalized_items
+    return normalized
+
+def normalize_orders(orders_input):
+    normalized = {}
+    if isinstance(orders_input, dict):
+        for uid, order_list in orders_input.items():
+            if not isinstance(order_list, list):
+                continue
+            clean_orders = []
+            for order in order_list:
+                if not isinstance(order, dict):
+                    continue
+                order_copy = dict(order)
+                item = order_copy.get("item")
+                if isinstance(item, dict):
+                    order_copy["item"] = {to_snake_key(k): v for k, v in item.items()}
+                clean_orders.append(order_copy)
+            normalized[str(uid)] = clean_orders
+    return normalized
+
+def normalize_pending_payments(pending_input):
+    normalized = {}
+    if isinstance(pending_input, dict):
+        for trx, uid in pending_input.items():
+            normalized[str(trx).lower()] = str(uid)
+    return normalized
+
+def normalize_unmatched_payments(unmatched_input):
+    normalized = {}
+    if isinstance(unmatched_input, dict):
+        for trx, amount in unmatched_input.items():
+            key = str(trx).lower()
+            try:
+                normalized[key] = float(amount)
+            except (TypeError, ValueError):
+                continue
+    return normalized
+
+def normalize_free_orders(free_orders_input):
+    normalized = {}
+    if isinstance(free_orders_input, dict):
+        for oid, info in free_orders_input.items():
+            if not isinstance(info, dict):
+                continue
+            entry = dict(info)
+            entry["user_id"] = str(entry.get("user_id", ""))
+            entry["vpn_name"] = str(entry.get("vpn_name", ""))
+            if "price" in entry:
+                try:
+                    entry["price"] = float(entry["price"])
+                except (TypeError, ValueError):
+                    entry["price"] = 0.0
+            entry["delivered"] = bool(entry.get("delivered", False))
+            delivery_details = entry.get("delivery_details")
+            if isinstance(delivery_details, dict):
+                entry["delivery_details"] = {to_snake_key(k): v for k, v in delivery_details.items()}
+            normalized[str(oid)] = entry
+    return normalized
+
+def normalize_processed_payments(values):
+    normalized_set = set()
+    iterable = []
+    if isinstance(values, dict):
+        iterable = values.keys()
+    elif isinstance(values, (list, set, tuple)):
+        iterable = values
+    for item in iterable:
+        if item is None:
+            continue
+        normalized_set.add(str(item).lower())
+    return sorted(normalized_set)
+
+def normalize_total_sales(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
 # ========== DATA ==========
 def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-    data.setdefault("products", {}) # { "VPN_Name": [{"gmail": "...", "password": "..."}] }
+    raw = {}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[WARN] Failed to load data file: {e}. Using defaults.")
+            raw = {}
+    data = {}
+    data["products"] = normalize_products(raw.get("products", {}))
+    data["balances"] = normalize_balances(raw.get("balances", {}))
+    data["pending_payments"] = normalize_pending_payments(raw.get("pending_payments", {}))
+    data["unmatched_payments"] = normalize_unmatched_payments(raw.get("unmatched_payments", {}))
+    data["orders"] = normalize_orders(raw.get("orders", {}))
+    data["total_sales"] = normalize_total_sales(raw.get("total_sales", 0.0))
+    data["free_orders"] = normalize_free_orders(raw.get("free_orders", {}))
+    data["processed_payments"] = normalize_processed_payments(raw.get("processed_payments", []))
+
+    data.setdefault("products", {})
     data.setdefault("balances", {})
     data.setdefault("pending_payments", {})
     data.setdefault("unmatched_payments", {})
     data.setdefault("orders", {})
     data.setdefault("total_sales", 0.0)
-    # NEW: Free orders store for out-of-stock requests
-    data.setdefault("free_orders", {}) # {order_id: {user_id, vpn_name, price, timestamp, delivered, delivery_details(optional)}}
+    data.setdefault("free_orders", {})
+    data.setdefault("processed_payments", [])
     return data
 
 def save_data(d):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
+    payload = {
+        "products": normalize_products(d.get("products", {})),
+        "balances": normalize_balances(d.get("balances", {})),
+        "pending_payments": normalize_pending_payments(d.get("pending_payments", {})),
+        "unmatched_payments": normalize_unmatched_payments(d.get("unmatched_payments", {})),
+        "orders": normalize_orders(d.get("orders", {})),
+        "total_sales": normalize_total_sales(d.get("total_sales", 0.0)),
+        "free_orders": normalize_free_orders(d.get("free_orders", {})),
+        "processed_payments": normalize_processed_payments(processed_payments),
+    }
+
+    temp_fd, temp_path = tempfile.mkstemp(dir=BASE_DIR, prefix="bot_data.", suffix=".tmp")
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, ensure_ascii=False, indent=2)
+        os.replace(temp_path, DATA_FILE)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+    # Keep in-memory reference updated for processed_payments list if needed
+    d["processed_payments"] = payload["processed_payments"]
 
 data               = load_data()
 products           = data["products"]
@@ -44,6 +187,14 @@ unmatched_payments = data["unmatched_payments"]
 orders             = data["orders"]
 total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
+processed_payments = set(data["processed_payments"])
+
+print("DATA_FILE path:", DATA_FILE)
+print("Exists:", os.path.exists(DATA_FILE))
+print("Balances users count:", len(balances))
+print("Total stock items:", sum(len(v) for v in products.values()))
+
+DATA_REPORT_INTERVAL_SECONDS = 3600
 
 # Updated vpn_prices structure based on your provided list
 vpn_prices = {
@@ -102,6 +253,16 @@ def admin_menu_markup():
 def norm_text(s): return " ".join(s.strip().split()).lower() if isinstance(s, str) else ""
 def ensure_user(uid): balances.setdefault(uid, 0.0); orders.setdefault(uid, [])
 
+def admin_command_help():
+    return (
+        "📋 Admin Slash Commands:\n"
+        "/data – বর্তমান bot_data.json ফাইল পাঠাবে\n"
+        "/buyer – মোট ইউজার, বায়ার সংখ্যা ও টপ বায়ার লিস্ট\n"
+        "/removebalance <user_id> – নির্দিষ্ট ইউজারের ব্যালেন্স 0 করবে\n"
+        "/broadcast – সবার কাছে ম্যাসেজ পাঠাবে\n"
+        "/remind_freeorders – Pending free order ইউজারদের রিমাইন্ডার"
+    )
+
 def parse_trx_id(text): 
     m_bkash = re.search(r'TrxID[:\s]+([A-Za-z0-9]+)', text, re.I)
     if m_bkash:
@@ -116,6 +277,158 @@ def parse_trx_id(text):
 def parse_amount(text): 
     m = re.search(r'\bTk\s?([0-9]+(?:\.[0-9]{1,2})?)\b', text.replace(",", ""), re.I)
     return float(m.group(1)) if m else None
+
+def build_buyer_stats_report(max_list=15):
+    total_users = len(balances)
+    buyer_map = {uid: user_orders for uid, user_orders in orders.items() if user_orders}
+
+    if not buyer_map:
+        return (
+            "👥 Buyer Overview\n\n"
+            f"Total Users: {total_users}\n"
+            "Unique Buyers: 0\n"
+            "Total Orders: 0\n\n"
+            "এখনো কেউ কোনো VPN কেনেনি।"
+        )
+
+    total_unique = len(buyer_map)
+    total_orders = sum(len(user_orders) for user_orders in buyer_map.values())
+
+    def ts_to_epoch(ts):
+        try:
+            return time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return 0
+
+    buyer_entries = []
+    for uid, user_orders in buyer_map.items():
+        order_count = len(user_orders)
+        last_timestamp = user_orders[-1].get("timestamp", "N/A")
+        buyer_entries.append((uid, order_count, last_timestamp, ts_to_epoch(last_timestamp)))
+
+    buyer_entries.sort(key=lambda item: (-item[1], -item[3], item[0]))
+
+    lines = [
+        "👥 Buyer Overview",
+        "",
+        f"Total Users: {total_users}",
+        f"Unique Buyers: {total_unique}",
+        f"Total Orders: {total_orders}",
+        "",
+        "🏆 Top Buyers:",
+    ]
+
+    for idx, (uid, count, last_ts, _) in enumerate(buyer_entries[:max_list], start=1):
+        lines.append(f"{idx}. `{uid}` — {count} order(s) (last: {last_ts})")
+
+    remaining = len(buyer_entries) - max_list
+    if remaining > 0:
+        lines.append(f"… এবং আরও {remaining} জন")
+
+    return "\n".join(lines)
+
+def reset_user_balance(admin_chat_id, target_uid):
+    target_uid = str(target_uid).strip()
+    if not target_uid:
+        bot.send_message(admin_chat_id, "❌ ইউজার আইডি প্রদান করুন।")
+        return
+
+    if target_uid not in balances:
+        bot.send_message(admin_chat_id, f"❌ ইউজার `{target_uid}` পাওয়া যায়নি।", parse_mode="Markdown")
+        return
+
+    previous_balance = balances.get(target_uid, 0.0)
+
+    if previous_balance == 0.0:
+        bot.send_message(admin_chat_id, f"ℹ️ ইউজার `{target_uid}` এর ব্যালেন্স আগে থেকেই 0 ছিল।", parse_mode="Markdown")
+        return
+
+    balances[target_uid] = 0.0
+    data["balances"] = balances
+    save_data(data)
+
+    bot.send_message(admin_chat_id, f"✅ ইউজার `{target_uid}` এর ব্যালেন্স 0 করা হয়েছে (আগে ছিল {previous_balance:.2f}৳)।", parse_mode="Markdown")
+
+    try:
+        bot.send_message(int(target_uid), "⚠️ আপনার ব্যালেন্স এডমিন কর্তৃক 0 করা হয়েছে। যদি কোনো প্রশ্ন থাকে, যোগাযোগ করুন।")
+    except Exception as e:
+        log(f"Could not notify user {target_uid} about balance reset: {e}")
+
+def generate_data_snapshot_file():
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    safe_timestamp = generated_at.replace(" ", "_").replace(":", "-")
+    filename = f"bot_data_snapshot_{safe_timestamp}.json"
+    file_path = os.path.join(tempfile.gettempdir(), filename)
+
+    try:
+        save_data(data)
+    except Exception as e:
+        log(f"Failed to persist data before snapshot: {e}")
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as src:
+            contents = src.read()
+    except FileNotFoundError:
+        log("DATA_FILE not found; using in-memory data for snapshot.")
+        contents = json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"Failed to read DATA_FILE: {e}")
+        contents = json.dumps(data, ensure_ascii=False, indent=2)
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as dst:
+            dst.write(contents)
+    except Exception as e:
+        log(f"Failed to write snapshot file: {e}")
+        raise
+
+    return file_path, generated_at
+
+def send_bot_data_snapshot(target_chat_id, reason="Scheduled hourly snapshot"):
+    try:
+        file_path, generated_at = generate_data_snapshot_file()
+    except Exception as e:
+        log(f"Unable to create bot data snapshot: {e}")
+        return
+
+    caption_lines = [
+        "📄 Bot Data Snapshot",
+        f"Generated: {generated_at}",
+    ]
+    if reason:
+        caption_lines.append(f"Reason: {reason}")
+    caption_lines.append(f"Users tracked: {len(balances)}")
+    caption = "\n".join(caption_lines)
+
+    try:
+        with open(file_path, "rb") as report_file:
+            bot.send_document(
+                target_chat_id,
+                report_file,
+                caption=caption,
+                parse_mode="Markdown",
+                visible_file_name=os.path.basename(file_path)
+            )
+    except Exception as e:
+        log(f"Failed to send bot data snapshot: {e}")
+    finally:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+def _data_report_worker():
+    log("Starting bot data report scheduler thread")
+    while True:
+        try:
+            send_bot_data_snapshot(ADMIN_ID)
+        except Exception as e:
+            log(f"Scheduler error: {e}")
+        time.sleep(DATA_REPORT_INTERVAL_SECONDS)
+
+def start_data_report_scheduler():
+    scheduler_thread = threading.Thread(target=_data_report_worker, name="BotDataReportScheduler", daemon=True)
+    scheduler_thread.start()
 
 # ========== START COMMANDS ==========
 @bot.message_handler(commands=['start', 'admin'])
@@ -143,7 +456,8 @@ def start_or_admin(message):
     )
 
     if uid == str(ADMIN_ID):
-        bot.send_message(message.chat.id, "👋 Welcome Admin! Choose an option:", reply_markup=admin_menu_markup())
+        welcome_text = "👋 Welcome Admin! Choose an option:\n\n" + admin_command_help()
+        bot.send_message(message.chat.id, welcome_text, reply_markup=admin_menu_markup())
     else:
         if WELCOME_PHOTO_FILE_ID:
             try:
@@ -468,6 +782,11 @@ def save_trx_id(message):
         bot.reply_to(message, "❌ Invalid TRX ID format. Please enter a valid Transaction ID.")
         bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
         return
+
+    if trx in processed_payments:
+        bot.reply_to(message, "❌ This TRX ID has already been confirmed. Please use a new one.")
+        bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+        return
     
     if trx in pending_payments:
         bot.reply_to(message, "⏳ This TRX ID is already pending admin confirmation.")
@@ -481,6 +800,7 @@ def save_trx_id(message):
         amt = unmatched_payments.pop(trx)
         balances[uid] = round(balances.get(uid, 0.0) + amt, 2)
         data["balances"], data["unmatched_payments"] = balances, unmatched_payments
+        processed_payments.add(trx)
         save_data(data)
         bot.reply_to(message, f"আপনার ব্যালেন্স সফলভাবে যুক্ত হয়েছে! 🎉\n \t└{amt} TK\n\t└ধন্যবাদ! 💖")
         bot.send_message(ADMIN_ID, f"✅ Auto-confirmed TRX `{trx.upper()}` for user `{uid}`. Amount: {amt} TK", parse_mode="Markdown")
@@ -503,11 +823,16 @@ def admin_bkash_nagad_parser(m):
     if not trx or amt is None:
         bot.reply_to(m, "❌ Could not extract TRX ID or amount from the SMS.")
         return
+
+    if trx in processed_payments:
+        bot.reply_to(m, f"⚠️ TRX ID `{trx.upper()}` already confirmed before. Ignoring duplicate message.", parse_mode="Markdown")
+        return
     
     if trx in pending_payments:
         uid = pending_payments.pop(trx)
         balances[uid] = round(balances.get(uid, 0.0) + amt, 2)
         data["balances"], data["pending_payments"] = balances, pending_payments
+        processed_payments.add(trx)
         save_data(data)
         bot.send_message(int(uid), f"আপনার ব্যালেন্স সফলভাবে যুক্ত হয়েছে! 🎉:\n\t└ {amt} TK\n\t└Transaction ID: `{trx.upper()}`\n\t└ধন্যবাদ! 💖", parse_mode="Markdown")
         bot.reply_to(m, f"✅ Auto-confirmed.\nUser: `{uid}`\nAmount: {amt} TK\nTRX: `{trx.upper()}`", parse_mode="Markdown")
@@ -526,6 +851,12 @@ def ask_broadcast_message(message):
         return
     msg = bot.send_message(message.chat.id, "📢 Send the message you want to broadcast to all users:", reply_markup=ForceReply())
     bot.register_next_step_handler(msg, broadcast_to_all)
+
+@bot.message_handler(commands=['data'])
+def send_data_snapshot(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    send_bot_data_snapshot(message.chat.id, "Manual /data request")
 
 def broadcast_to_all(message):
     if str(message.from_user.id) != str(ADMIN_ID):
@@ -703,7 +1034,30 @@ def back_to_main_menu_admin(message):
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "📊 total sales" and str(m.from_user.id) == str(ADMIN_ID))
 def show_total_sales(message):
-    bot.send_message(message.chat.id, f"📈 Total Sales Revenue: {total_sales:.2f}৳", reply_markup=admin_menu_markup())
+    today_counts = {}
+    today_date = time.strftime("%Y-%m-%d")
+
+    for user_orders in orders.values():
+        for order in user_orders:
+            vpn_name = order.get("vpn_name", "Unknown VPN")
+
+            timestamp = order.get("timestamp", "")
+            order_date = timestamp.split(" ")[0] if " " in timestamp else timestamp
+            if order_date == today_date:
+                today_counts[vpn_name] = today_counts.get(vpn_name, 0) + 1
+
+    def format_counts(title, counts_dict):
+        if not counts_dict:
+            return f"{title}: 0"
+        lines = [title]
+        for name, count in sorted(counts_dict.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"🔹 {name}: {count}")
+        return "\n".join(lines)
+
+    today_summary = format_counts(f"📆 আজ ({today_date}) Sell", today_counts)
+    summary_text = "📈 Sales Summary\n\n" + today_summary
+
+    bot.send_message(message.chat.id, summary_text, parse_mode="Markdown", reply_markup=admin_menu_markup())
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "📈 current stock" and str(m.from_user.id) == str(ADMIN_ID))
 def show_current_stock(message):
@@ -719,6 +1073,38 @@ def show_current_stock(message):
         stock_report += "No VPNs currently in stock."
     
     bot.send_message(message.chat.id, stock_report, parse_mode="Markdown", reply_markup=admin_menu_markup())
+
+@bot.message_handler(commands=['buyer'])
+def send_buyer_stats(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    ensure_user(str(message.from_user.id))
+    report = build_buyer_stats_report()
+    bot.send_message(message.chat.id, report, parse_mode="Markdown")
+
+@bot.message_handler(commands=['removebalance', 'removrblance'])
+def remove_balance_command(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        reset_user_balance(message.chat.id, parts[1].strip())
+        return
+
+    prompt = bot.send_message(message.chat.id, "কোন ইউজারের ব্যালেন্স 0 করতে চান? User ID পাঠান:", reply_markup=ForceReply())
+    bot.register_next_step_handler(prompt, remove_balance_followup)
+
+def remove_balance_followup(message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    target_uid = (message.text or "").strip()
+    if not target_uid:
+        bot.send_message(message.chat.id, "❌ ইউজার আইডি খালি থাকতে পারে না। অপারেশন বাতিল।")
+        return
+
+    reset_user_balance(message.chat.id, target_uid)
 
 @bot.message_handler(func=lambda m: norm_text(m.text) == "➕ add vpn account" and str(m.from_user.id) == str(ADMIN_ID))
 def ask_add_vpn_account(message):
@@ -739,8 +1125,12 @@ def admin_selected_vpn_to_add(c):
     format_example = ""
     for field in prompt_fields:
         format_example += f"*{field}*:your_{field.lower().replace(' ', '_')}_value\n"
-    
-    prompt_text += f"`{format_example.strip()}`"
+
+    prompt_text += (
+        f"`{format_example.strip()}`\n\n"
+        "👉 আপনি একই ফরম্যাট বারবার লিখে একসাথে একাধিক একাউন্ট যোগ করতে পারবেন।\n"
+        "প্রতিটি একাউন্টের তথ্য আলাদা লাইনে বা ফাঁকা লাইন দিয়ে লিখুন।"
+    )
 
     msg = bot.send_message(c.message.chat.id, prompt_text, parse_mode="Markdown", reply_markup=ForceReply())
     bot.register_next_step_handler(msg, process_add_vpn_account, vpn_name)
@@ -748,40 +1138,91 @@ def admin_selected_vpn_to_add(c):
 
 def process_add_vpn_account(message, vpn_name):
     txt = (message.text or "").strip()
-    details = {}
-    lines = txt.split('\n')
-    
-    # Parse input based on expected fields
-    required_fields_for_vpn = product_fields.get(vpn_name, ["Gmail", "Password"]) # Default to Gmail/Password
-    
-    parsed_count = 0
-    for line in lines:
-        if ':' in line:
-            key, value = line.split(':', 1)
-            standardized_key = key.strip().lower().replace(" ", "_")
-            details[standardized_key] = value.strip()
-            parsed_count += 1
-    
-    # Check if all required fields are present
-    missing_fields = []
-    for field in required_fields_for_vpn:
-        standardized_field_key = field.lower().replace(" ", "_")
-        if standardized_field_key not in details or not details[standardized_field_key]:
-            missing_fields.append(field)
-
-    if missing_fields:
-        bot.reply_to(message, f"❌ Invalid format. The following fields are required: {', '.join(missing_fields)}. Please try again.")
+    if not txt:
+        bot.reply_to(message, "❌ No data received. Please send the account details in the requested format.")
         bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
         return
 
-    products.setdefault(vpn_name, []).append(details) # Store the details dictionary as is
+    required_fields_for_vpn = product_fields.get(vpn_name, ["Gmail", "Password"]) # Default to Gmail/Password
+    required_keys = [field.lower().replace(" ", "_") for field in required_fields_for_vpn]
+
+    def all_required_present(record):
+        return all(record.get(key) for key in required_keys)
+
+    accounts_to_add = []
+    current_record = {}
+
+    for raw_line in message.text.splitlines():
+        line = (raw_line or "").strip()
+
+        # Treat blank line as separator between accounts
+        if not line:
+            if current_record:
+                if all_required_present(current_record):
+                    accounts_to_add.append(current_record.copy())
+                    current_record = {}
+                else:
+                    missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+                    bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+                    bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+                    return
+            continue
+
+        if ':' not in line:
+            continue
+
+        key, value = line.split(':', 1)
+        standardized_key = key.strip().lower().replace(" ", "_")
+        standardized_value = value.strip()
+
+        # If the admin repeats a required key before finishing current record, assume a new record
+        if standardized_key in current_record and standardized_key in required_keys:
+            if all_required_present(current_record):
+                accounts_to_add.append(current_record.copy())
+                current_record = {}
+            else:
+                missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+                bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+                bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+                return
+
+        current_record[standardized_key] = standardized_value
+
+        if all_required_present(current_record):
+            accounts_to_add.append(current_record.copy())
+            current_record = {}
+
+    # Handle any remaining record at the end
+    if current_record:
+        if all_required_present(current_record):
+            accounts_to_add.append(current_record.copy())
+        else:
+            missing = [required_fields_for_vpn[idx] for idx, key in enumerate(required_keys) if not current_record.get(key)]
+            bot.reply_to(message, f"❌ Missing fields: {', '.join(missing)}. Please resend the data correctly.")
+            bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+            return
+
+    if not accounts_to_add:
+        bot.reply_to(message, "❌ No valid account found. Please follow the provided format and try again.")
+        bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
+        return
+
+    stock_list = products.setdefault(vpn_name, [])
+    before_count = len(stock_list)
+
+    for account in accounts_to_add:
+        stock_list.append(account)
+
     data["products"] = products
     save_data(data)
-    
-    bot.reply_to(message, f"✅ Successfully added 1 account for *{vpn_name}* to stock. Current stock: {len(products[vpn_name])}", parse_mode="Markdown")
+
+    added_count = len(stock_list) - before_count
+    bot.reply_to(message, f"✅ Successfully added {added_count} account(s) for *{vpn_name}* to stock. Current stock: {len(stock_list)}", parse_mode="Markdown")
     bot.send_message(message.chat.id, "⬅️ Back to Admin Menu:", reply_markup=admin_menu_markup())
 
 # ========== ERROR HANDLER ==========
+
+start_data_report_scheduler()
 
 print("Bot polling...")
 bot.infinity_polling(
