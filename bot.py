@@ -24,8 +24,11 @@ def load_data():
         data = {}
     data.setdefault("products", {}) # { "VPN_Name": [{"gmail": "...", "password": "..."}] }
     data.setdefault("balances", {})
+    data.setdefault("usd_balances", {})
     data.setdefault("pending_payments", {})
+    data.setdefault("pending_binance_payments", {})
     data.setdefault("unmatched_payments", {})
+    data.setdefault("unmatched_binance_payments", {})
     data.setdefault("orders", {})
     data.setdefault("total_sales", 0.0)
     # NEW: Free orders store for out-of-stock requests
@@ -38,9 +41,12 @@ def save_data(d):
 
 data               = load_data()
 products           = data["products"]
-balances           = data["balances"]
-pending_payments   = data["pending_payments"]
-unmatched_payments = data["unmatched_payments"]
+balances                 = data["balances"]
+usd_balances             = data["usd_balances"]
+pending_payments         = data["pending_payments"]
+pending_binance_payments = data["pending_binance_payments"]
+unmatched_payments       = data["unmatched_payments"]
+unmatched_binance_payments = data["unmatched_binance_payments"]
 orders             = data["orders"]
 total_sales        = data["total_sales"]
 free_orders        = data["free_orders"]
@@ -78,6 +84,23 @@ product_fields = {
 # Payment gateway number (updated to your specified number)
 PAYMENT_NUMBER = "01739089344" 
 
+# Binance payment details (update with your actual Binance Pay ID or wallet info)
+BINANCE_PAYMENT_INSTRUCTIONS = (
+    "Send USDT via Binance Pay or Binance P2P to the following details:\n"
+    "Receiver: your-binance-id\n"
+    "Network: Binance Pay\n"
+    "After completing payment, submit your Binance Order ID."
+)
+
+# Mapping of BDT prices to USD display values
+usd_price_map = {
+    40: 0.35,
+    30: 0.25,
+    15: 0.13
+}
+
+DEFAULT_EXCHANGE_RATE = 115.0
+
 # ========== SMALL DEBUG LOG ==========
 def log(msg):
     try:
@@ -100,7 +123,16 @@ def admin_menu_markup():
     return kb
 
 def norm_text(s): return " ".join(s.strip().split()).lower() if isinstance(s, str) else ""
-def ensure_user(uid): balances.setdefault(uid, 0.0); orders.setdefault(uid, [])
+def ensure_user(uid):
+    balances.setdefault(uid, 0.0)
+    usd_balances.setdefault(uid, 0.0)
+    orders.setdefault(uid, [])
+
+def get_usd_price(bdt_price):
+    usd_val = usd_price_map.get(bdt_price)
+    if usd_val is None:
+        usd_val = round(bdt_price / DEFAULT_EXCHANGE_RATE, 2)
+    return usd_val
 
 def parse_trx_id(text): 
     m_bkash = re.search(r'TrxID[:\s]+([A-Za-z0-9]+)', text, re.I)
@@ -117,6 +149,23 @@ def parse_amount(text):
     m = re.search(r'\bTk\s?([0-9]+(?:\.[0-9]{1,2})?)\b', text.replace(",", ""), re.I)
     return float(m.group(1)) if m else None
 
+def parse_binance_order_id(text):
+    if not text:
+        return None
+    m = re.search(r'order[\s_-]*id[:\s#-]*([A-Za-z0-9-]+)', text, re.I)
+    if m:
+        return m.group(1).strip().lower()
+    m = re.search(r'\bID[:\s#-]*([A-Za-z0-9-]{6,})\b', text, re.I)
+    if m:
+        return m.group(1).strip().lower()
+    return None
+
+def parse_usd_amount(text):
+    if not text:
+        return None
+    m = re.search(r'([0-9]+(?:\.[0-9]{1,2})?)\s*(?:usd|usdt|\$)', text.replace(",", ""), re.I)
+    return float(m.group(1)) if m else None
+
 # ========== START COMMANDS ==========
 @bot.message_handler(commands=['start', 'admin'])
 def start_or_admin(message):
@@ -129,11 +178,12 @@ def start_or_admin(message):
         "—ধন্যবাদ 💞\n\n"
         "যেভাবে ব্যালেন্স এড করবেন 💳\n\n"
         "\t└ 💰ADD BALANCE এ ক্লিক করুন\n"
-        "\t└ bKash/Nagad সিলেক্ট করুন\n"
-        "\t└ নাম্বারটি কপি করে পেমেন্ট করুন\n"
-        "\t└ Trx Id কপি করে রাখুন\n"
+        "\t└ bKash/Nagad/Binance সিলেক্ট করুন\n"
+        "\t└ নাম্বার/Order ID এর নির্দেশনা অনুসরণ করে পেমেন্ট করুন\n"
+        "\t└ bKash/Nagad এর জন্য Trx Id কপি করে রাখুন\n"
+        "\t└ Binance এর জন্য Order ID কপি করে রাখুন\n"
         "\t└ Payment Done ক্লিক করুন\n"
-        "\t└ Trx Id দিন\n"
+        "\t└ Trx Id বা Order ID দিন\n"
         "\t└ Balance Add হয়ে যাবে\n\n"
         "যেভাবে Vpn নিবেন 🛍\n\n"
         "\t└ Buy Products এ ক্লিক করুন\n"
@@ -158,11 +208,22 @@ def start_or_admin(message):
 def show_balance(message):
     uid = str(message.from_user.id)
     ensure_user(uid)
-    bot.send_message(message.chat.id, f"💳 Your current balance: {balances.get(uid, 0.0):.2f}৳", reply_markup=main_menu_markup())
+    bdt_balance = balances.get(uid, 0.0)
+    usd_balance = usd_balances.get(uid, 0.0)
+    balance_text = (
+        "💳 Your current balance:\n"
+        f"• {bdt_balance:.2f}৳\n"
+        f"• ${usd_balance:.2f}"
+    )
+    bot.send_message(message.chat.id, balance_text, reply_markup=main_menu_markup())
 
 # ========== BUY PRODUCTS ==========
 @bot.message_handler(func=lambda m: norm_text(m.text) == "🛒 buy products")
 def show_vpn_list(message):
+    uid = str(message.from_user.id)
+    ensure_user(uid)
+    user_usd_balance = usd_balances.get(uid, 0.0)
+    use_usd_display = user_usd_balance > 0
     markup = InlineKeyboardMarkup()
     for name, data_item in vpn_prices.items():
         price = data_item["price"]
@@ -171,8 +232,15 @@ def show_vpn_list(message):
         
         # Use a red dot for out of stock, checkmark for in stock
         status_icon = "✅" if stock_count > 0 else "🔴"
-        markup.add(InlineKeyboardButton(f"{name} {days} Days {price}৳ {status_icon}", callback_data=f"vpn|{name}")) 
-    bot.send_message(message.chat.id, "🛍 Available VPNs:", reply_markup=markup)
+        if use_usd_display:
+            usd_price = get_usd_price(price)
+            price_text = f"${usd_price:.2f} ({price}৳)"
+        else:
+            price_text = f"{price}৳"
+        markup.add(InlineKeyboardButton(f"{name} {days} Days {price_text} {status_icon}", callback_data=f"vpn|{name}")) 
+
+    header_text = "🛍 Available VPNs (USD pricing shown):" if use_usd_display else "🛍 Available VPNs:"
+    bot.send_message(message.chat.id, header_text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("vpn|"))
 def vpn_selected(c):
@@ -187,7 +255,11 @@ def vpn_selected(c):
     price = vpn_info["price"]
     days = vpn_info["days"]
     uid = str(c.from_user.id)
-    bal = balances.get(uid, 0.0)
+    bal_bdt = balances.get(uid, 0.0)
+    bal_usd = usd_balances.get(uid, 0.0)
+    usd_price = get_usd_price(price)
+    can_pay_bdt = bal_bdt >= price
+    can_pay_usd = bal_usd >= usd_price
     stock_count = len(products.get(vpn_name, [])) # Stock count for logic, not display to user
 
     kb = InlineKeyboardMarkup()
@@ -196,8 +268,8 @@ def vpn_selected(c):
     message_text = (
         f"🛍 *{vpn_name}*\n\n"
         f"*🕒 Duration*:  {days} Days\n"
-        f"\t└ *Price:* *{price}৳*\n"
-        f"\t**Your Balance:** {bal:.2f}৳\n\n"
+        f"\t└ *Price:* {price}৳ / ${usd_price:.2f}\n"
+        f"\t└ *Your Balance:* {bal_bdt:.2f}৳ | ${bal_usd:.2f}\n\n"
     )
     
     if stock_count == 0:
@@ -205,12 +277,17 @@ def vpn_selected(c):
         message_text += "*🚫দুঃখিত ভাই এই Vpn Stock নেই*\n\nঅর্ডার করে রাখতে পারেন Account করে আপনাকে দেওয়া হবে 💗 "
         # NEW: Free order request button
         kb.add(InlineKeyboardButton("📩 Request Order", callback_data=f"freeorder|{vpn_name}"))
-    elif bal < price:
+    elif not (can_pay_bdt or can_pay_usd):
         bot.answer_callback_query(c.id, "Insufficient balance. Please add funds.", show_alert=True)
         message_text += "💰 Insufficient balance. Please add funds."
         kb.add(InlineKeyboardButton("➕ Add Balance", callback_data="add_balance_shortcut")) # Correct emoji
     else: # Sufficient balance and stock
-        message_text += "Ready to purchase!"
+        if can_pay_usd and not can_pay_bdt:
+            message_text += "Ready to purchase with your USD balance!"
+        elif can_pay_usd and can_pay_bdt:
+            message_text += "Ready to purchase! USD balance will be used first."
+        else:
+            message_text += "Ready to purchase with your BDT balance!"
         kb.add(InlineKeyboardButton("✅ Buy Now", callback_data=f"buy|{vpn_name}"))
     
     # Always include Cancel and Back to Main Menu
@@ -241,7 +318,8 @@ def process_buy(c):
     log(f"callback process_buy data={c.data} from={c.from_user.id}")
     vpn_name = c.data.split("|")[1]
     uid = str(c.from_user.id)
-    bal = balances.get(uid, 0.0)
+    bal_bdt = balances.get(uid, 0.0)
+    bal_usd = usd_balances.get(uid, 0.0)
     vpn_info = vpn_prices.get(vpn_name)
 
     if not vpn_info:
@@ -249,9 +327,17 @@ def process_buy(c):
         return
 
     price = vpn_info["price"]
+    usd_price = get_usd_price(price)
 
     # Check balance
-    if bal < price:
+    payment_currency = None
+    if bal_usd >= usd_price:
+        usd_balances[uid] = round(bal_usd - usd_price, 2)
+        payment_currency = ("USD", usd_price)
+    elif bal_bdt >= price:
+        balances[uid] = round(bal_bdt - price, 2)
+        payment_currency = ("BDT", price)
+    else:
         bot.answer_callback_query(c.id, "❌ Insufficient balance.", show_alert=True)
         return
 
@@ -261,8 +347,9 @@ def process_buy(c):
         bot.answer_callback_query(c.id, "❌ Out of stock.", show_alert=True)
         return
 
-    # Deduct balance
-    balances[uid] = round(bal - price, 2)
+    # Ensure both balance dicts have defaults after possible updates
+    balances.setdefault(uid, balances.get(uid, 0.0))
+    usd_balances.setdefault(uid, usd_balances.get(uid, 0.0))
 
     # Pop one VPN account from stock
     item = stock_list.pop(0)
@@ -280,7 +367,7 @@ def process_buy(c):
     total_sales += price
 
     # Save data
-    data["balances"], data["products"], data["orders"], data["total_sales"] = balances, products, orders, total_sales
+    data["balances"], data["usd_balances"], data["products"], data["orders"], data["total_sales"] = balances, usd_balances, products, orders, total_sales
     save_data(data)
 
     # Build delivery message
@@ -289,6 +376,13 @@ def process_buy(c):
     for field in fields_to_display:
         key = field.lower().replace(" ", "_")
         delivered_msg += f"*{field}* ➡ `{item.get(key, 'N/A')}`\n\n"
+
+    if payment_currency:
+        currency_label, currency_amount = payment_currency
+        if currency_label == "USD":
+            delivered_msg += f"*Paid With:* ${currency_amount:.2f}\n\n"
+        else:
+            delivered_msg += f"*Paid With:* {currency_amount:.2f}৳\n\n"
 
     # Send to user
     try:
@@ -299,9 +393,18 @@ def process_buy(c):
     bot.send_message(c.message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
 
     # Notify admin
+    if payment_currency:
+        currency_label, currency_amount = payment_currency
+        if currency_label == "USD":
+            payment_line = f"Amount: ${currency_amount:.2f}"
+        else:
+            payment_line = f"Amount: {currency_amount:.2f}৳"
+    else:
+        payment_line = f"Amount: {price}৳"
+
     bot.send_message(
         ADMIN_ID,
-        f"🛒 New Order\nUser: `{uid}`\nVPN: *{vpn_name}*\nPrice: {price}৳",
+        f"🛒 New Order\nUser: `{uid}`\nVPN: *{vpn_name}*\nPrice: {price}৳\n{payment_line}",
         parse_mode="Markdown"
     )
 
@@ -319,9 +422,11 @@ def confirm_free_order(c):
 
     price = vpn_info["price"]
     uid = str(c.from_user.id)
-    bal = balances.get(uid, 0.0)
+    bal_bdt = balances.get(uid, 0.0)
+    bal_usd = usd_balances.get(uid, 0.0)
+    usd_price = get_usd_price(price)
 
-    if bal < price:
+    if bal_bdt < price and bal_usd < usd_price:
         bot.answer_callback_query(c.id, "Insufficient balance.", show_alert=True)
         return
 
@@ -334,8 +439,8 @@ def confirm_free_order(c):
     try:
         bot.edit_message_text(
             f"আপনি কি নিশ্চিত যে *{vpn_name}* এর অর্ডার করতে চান?\n\n"
-            f"💳 Price: {price}৳\n"
-            f"💰 Your Balance: {bal:.2f}৳",
+            f"💳 Price: {price}৳ / ${usd_price:.2f}\n"
+            f"💰 Your Balance: {bal_bdt:.2f}৳ | ${bal_usd:.2f}",
             c.message.chat.id, c.message.message_id,
             parse_mode="Markdown", reply_markup=kb
         )
@@ -355,23 +460,36 @@ def request_free_order(c):
 
     price = vpn_info["price"]
     uid = str(c.from_user.id)
-    bal = balances.get(uid, 0.0)
+    bal_bdt = balances.get(uid, 0.0)
+    bal_usd = usd_balances.get(uid, 0.0)
+    usd_price = get_usd_price(price)
 
-    if bal < price:
+    if bal_bdt < price and bal_usd < usd_price:
         bot.answer_callback_query(c.id, "Insufficient balance.", show_alert=True)
         return
 
     # Deduct balance and create a free order entry
-    balances[uid] = round(bal - price, 2)
+    payment_currency = None
+    if bal_usd >= usd_price:
+        usd_balances[uid] = round(bal_usd - usd_price, 2)
+        payment_currency = ("USD", usd_price)
+    elif bal_bdt >= price:
+        balances[uid] = round(bal_bdt - price, 2)
+        payment_currency = ("BDT", price)
+    else:
+        bot.answer_callback_query(c.id, "Insufficient balance.", show_alert=True)
+        return
+
     order_id = f"{uid}_{int(time.time())}"
     free_orders[order_id] = {
         "user_id": uid,
         "vpn_name": vpn_name,
         "price": price,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "delivered": False
+        "delivered": False,
+        "payment_currency": payment_currency[0] if payment_currency else "BDT"
     }
-    data["balances"], data["free_orders"] = balances, free_orders
+    data["balances"], data["usd_balances"], data["free_orders"] = balances, usd_balances, free_orders
     save_data(data)
 
     try:
@@ -383,9 +501,17 @@ def request_free_order(c):
         log(f"request_free_order edit failed: {e}")
         bot.edit_message_text("Free order submitted.", c.message.chat.id, c.message.message_id)
     bot.send_message(c.message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+    currency_line = "Paid With: Unknown"
+    if payment_currency:
+        currency_label, currency_amount = payment_currency
+        if currency_label == "USD":
+            currency_line = f"Paid With: ${currency_amount:.2f}"
+        else:
+            currency_line = f"Paid With: {currency_amount:.2f}৳"
+
     bot.send_message(
         ADMIN_ID,
-        f"📩 New Free Order Request:\nUser: `{uid}`\nVPN: *{vpn_name}*\nPrice: {price}৳\nOrder ID: `{order_id}`",
+        f"📩 New Free Order Request:\nUser: `{uid}`\nVPN: *{vpn_name}*\nPrice: {price}৳ / ${usd_price:.2f}\n{currency_line}\nOrder ID: `{order_id}`",
         parse_mode="Markdown"
     )
     bot.answer_callback_query(c.id, "Request placed successfully!", show_alert=True)
@@ -431,6 +557,7 @@ def add_balance_ui(message):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🟣 Bkash", callback_data="add_balance_bkash"))
     kb.add(InlineKeyboardButton("🟠 Nagad", callback_data="add_balance_nagad"))
+    kb.add(InlineKeyboardButton("🟡 Binance (USD)", callback_data="add_balance_binance"))
     bot.send_message(message.chat.id, "Choose your payment method:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data == "add_balance_shortcut")
@@ -438,29 +565,50 @@ def add_balance_shortcut(c):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🟣 Bkash", callback_data="add_balance_bkash"))
     kb.add(InlineKeyboardButton("🟠 Nagad", callback_data="add_balance_nagad"))
+    kb.add(InlineKeyboardButton("🟡 Binance (USD)", callback_data="add_balance_binance"))
     bot.edit_message_text("Choose your payment method:", c.message.chat.id, c.message.message_id, reply_markup=kb)
     bot.answer_callback_query(c.id, "Redirecting to Add Balance section.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_balance_"))
 def show_payment_details(c):
-    method = c.data.split("_")[2].capitalize() # "Bkash" or "Nagad"
+    method_key = c.data.split("_")[2].lower()
+    method_name = method_key.capitalize()
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("Payment Done ✅", callback_data="send_trx"))
-    
+    kb.add(InlineKeyboardButton("Payment Done ✅", callback_data=f"payment_done|{method_key}"))
+
+    if method_key == "binance":
+        instructions = (
+            f"🟡 *Binance (USD) Payment Instructions*\n\n{BINANCE_PAYMENT_INSTRUCTIONS}\n\n"
+            "After sending payment, tap *Payment Done ✅* and submit your Binance Order ID."
+        )
+    else:
+        instructions = (
+            f"নিচের দেওয়া {method_name} নাম্বারে এ সেন্ড মানি করবেন 👇\n\n`{PAYMENT_NUMBER}`\n\n"
+            "Trx Id কপি করে রাখবেন\n\nটাকা পাঠানোর পর Payment Done ✅ এ ক্লিক করুন\n └ TRX ID দিন"
+        )
+
     bot.edit_message_text(
-        f"নিচের দেওয়া {method} নাম্বারে এ সেন্ড মানি করবেন 👇\n\n`{PAYMENT_NUMBER}`\n\n"
-        "Trx Id কপি করে রাখবেন\n\nটাকা পাঠানোর পর Payment Done ✅ এ ক্লিক করুন\n └ TRX ID দিন",
+        instructions,
         c.message.chat.id, c.message.message_id, parse_mode="Markdown", reply_markup=kb
     )
-    bot.answer_callback_query(c.id, f"Showing {method} payment details.")
+    prompt_text = "Binance" if method_key == "binance" else method_name
+    bot.answer_callback_query(c.id, f"Showing {prompt_text} payment details.")
 
-@bot.callback_query_handler(func=lambda c: c.data == "send_trx")
-def ask_trx(c):
-    msg = bot.send_message(c.message.chat.id, "📥 TRX ID দিন", reply_markup=ForceReply())
-    bot.register_next_step_handler(msg, save_trx_id)
-    bot.answer_callback_query(c.id, "Please send your TRX ID.")
+@bot.callback_query_handler(func=lambda c: c.data.startswith("payment_done|"))
+def ask_payment_reference(c):
+    method = c.data.split("|")[1]
+    if method in ("bkash", "nagad"):
+        msg = bot.send_message(c.message.chat.id, "📥 TRX ID দিন", reply_markup=ForceReply())
+        bot.register_next_step_handler(msg, save_bdt_trx, method)
+        bot.answer_callback_query(c.id, "Please send your TRX ID.")
+    elif method == "binance":
+        msg = bot.send_message(c.message.chat.id, "📥 Binance Order ID দিন", reply_markup=ForceReply())
+        bot.register_next_step_handler(msg, save_binance_order_id)
+        bot.answer_callback_query(c.id, "Please send your Binance Order ID.")
+    else:
+        bot.answer_callback_query(c.id, "Unknown payment method.", show_alert=True)
 
-def save_trx_id(message):
+def save_bdt_trx(message, method):
     uid = str(message.from_user.id)
     trx = (message.text or "").strip().lower()
 
@@ -487,8 +635,41 @@ def save_trx_id(message):
     else:
         save_data(data)
         bot.reply_to(message, "✅ TRX ID received. Thank You ❤️‍🩹")
-        bot.send_message(ADMIN_ID, f"💳 *Payment Request*\nTRX ID: `{trx.upper()}`\nUser ID: `{uid}`\n\nForward the bKash/Nagad SMS here to confirm.", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, f"💳 *Payment Request*\nTRX ID: `{trx.upper()}`\nUser ID: `{uid}`\n\nForward the {method.title()} SMS here to confirm.", parse_mode="Markdown")
     
+    bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+
+def save_binance_order_id(message):
+    uid = str(message.from_user.id)
+    raw_order_id = (message.text or "").strip()
+    order_id = raw_order_id.replace(" ", "").lower()
+
+    if not re.fullmatch(r"[a-z0-9-]+", order_id):
+        bot.reply_to(message, "❌ Invalid Order ID format. Please enter a valid Binance Order ID.")
+        bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+        return
+
+    if order_id in pending_binance_payments:
+        bot.reply_to(message, "⏳ This Order ID is already pending admin confirmation.")
+        bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
+        return
+
+    pending_binance_payments[order_id] = uid
+    data["pending_binance_payments"] = pending_binance_payments
+
+    if order_id in unmatched_binance_payments:
+        usd_amount = unmatched_binance_payments.pop(order_id)
+        usd_balances[uid] = round(usd_balances.get(uid, 0.0) + usd_amount, 2)
+        data["usd_balances"], data["unmatched_binance_payments"] = usd_balances, unmatched_binance_payments
+        save_data(data)
+        bot.reply_to(message, f"✅ ${usd_amount:.2f} সফলভাবে যুক্ত হয়েছে! ধন্যবাদ 💖")
+        bot.send_message(ADMIN_ID, f"✅ Auto-confirmed Binance Order `{order_id.upper()}` for user `{uid}`. Amount: ${usd_amount:.2f}", parse_mode="Markdown")
+    else:
+        data["usd_balances"] = usd_balances
+        save_data(data)
+        bot.reply_to(message, "✅ Order ID received. Thank You ❤️‍🩹")
+        bot.send_message(ADMIN_ID, f"💸 *Binance Payment Request*\nOrder ID: `{order_id.upper()}`\nUser ID: `{uid}`\n\nConfirm once payment is received.", parse_mode="Markdown")
+
     bot.send_message(message.chat.id, "⬅️ Back to menu:", reply_markup=main_menu_markup())
 
 @bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text and 
@@ -518,6 +699,34 @@ def admin_bkash_nagad_parser(m):
         bot.reply_to(m, f"⚠ SMS saved. No pending user request found for TRX ID: `{trx.upper()}`. Will auto-confirm when user provides TRX ID.\nAmount: {amt} TK", parse_mode="Markdown")
     else:
         bot.reply_to(m, f"ℹ️ This TRX ID `{trx.upper()}` is already in unmatched payments.", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text and ("order" in m.text.lower() or "binance" in m.text.lower()) and ("$" in m.text or "usd" in m.text.lower() or "usdt" in m.text.lower()))
+def admin_binance_parser(m):
+    txt = (m.text or "").strip()
+    order_id = parse_binance_order_id(txt)
+    usd_amount = parse_usd_amount(txt)
+
+    if not order_id or usd_amount is None:
+        bot.reply_to(m, "❌ Could not extract Binance Order ID or USD amount from the message.")
+        return
+
+    if order_id in pending_binance_payments:
+        uid = pending_binance_payments.pop(order_id)
+        usd_balances[uid] = round(usd_balances.get(uid, 0.0) + usd_amount, 2)
+        data["usd_balances"], data["pending_binance_payments"] = usd_balances, pending_binance_payments
+        save_data(data)
+        try:
+            bot.send_message(int(uid), f"✅ ${usd_amount:.2f} আপনার ব্যালেন্সে যুক্ত হয়েছে!\nOrder ID: `{order_id.upper()}`\nধন্যবাদ 💖", parse_mode="Markdown")
+        except Exception as e:
+            print(f"Could not notify user {uid}: {e}")
+        bot.reply_to(m, f"✅ Binance payment confirmed.\nUser: `{uid}`\nAmount: ${usd_amount:.2f}\nOrder ID: `{order_id.upper()}`", parse_mode="Markdown")
+    elif order_id not in unmatched_binance_payments:
+        unmatched_binance_payments[order_id] = usd_amount
+        data["unmatched_binance_payments"] = unmatched_binance_payments
+        save_data(data)
+        bot.reply_to(m, f"⚠ Binance payment saved. No pending request found for Order ID: `{order_id.upper()}`. Will auto-confirm when the user submits.\nAmount: ${usd_amount:.2f}", parse_mode="Markdown")
+    else:
+        bot.reply_to(m, f"ℹ️ This Binance Order ID `{order_id.upper()}` is already recorded as unmatched.", parse_mode="Markdown")
 
 # ========== ADMIN: BROADCAST ==========
 @bot.message_handler(commands=['broadcast'])
@@ -611,6 +820,7 @@ def show_free_orders(message):
                 f"*User:* `{od['user_id']}`\n"
                 f"*VPN:* *{od['vpn_name']}*\n"
                 f"*Price:* {od['price']}৳\n"
+                f"*Paid With:* {od.get('payment_currency', 'BDT')}\n"
                 f"*Time:* {od['timestamp']}\n\n"
             )
             markup.add(InlineKeyboardButton(f"Deliver {oid}", callback_data=f"deliver|{oid}"))
